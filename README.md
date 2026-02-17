@@ -2,6 +2,12 @@
 
 This skill is a conversion of the excellent React Query blog series by **Dominik Dorfmeister (TkDodo)**, the maintainer of TanStack Query.
 
+## Installation
+
+```
+npx skills add https://github.com/mhdcodes/react-query-skill
+```
+
 ## Original Source
 
 All content in this skill is derived from the blog posts at:
