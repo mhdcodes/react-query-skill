@@ -1,0 +1,274 @@
+# React Query meets React Router
+
+[Remix](https://remix.run/) is changing the game, and they are bringing their data fetching concepts (loaders and actions) to purely client side rendered applications with [React Router 6.4](https://reactrouter.com/en/6.4.0/start/overview). I went through their great [tutorial](https://reactrouter.com/en/6.4.0/start/tutorial) that shows the concept very well and demonstrates how you can quickly build a small, but feature-rich app.
+
+With React Router coming into the data fetching game, it is naturally interesting to understand how this competes or correlates with existing data fetching and caching libraries like React Query. So let me spoil it right here:
+
+<Highlight>They are a match made in heaven</Highlight>
+
+## A router that fetches data
+
+To recap: React Router will allow you to define [loaders](https://reactrouter.com/en/6.4.0/route/loader) on each route, which will be called when the route is visited. In the route component itself, you can `useLoaderData()` to get access to that data. Updating data is as simple as submitting a `Form`, which will call an [action](https://reactrouter.com/en/6.4.0/route/action) function. Actions invalidate all active loaders, so you'll automagically see updated data on your screen.
+
+If this sounds very similar to `queries` and `mutations` - you are right, it does. So the questions that have been popping up after the announcement of [Remixing React Router](https://remix.run/blog/remixing-react-router) are:
+
+- Would we still want React Query now that we can fetch in the route?
+- If we already use React Query, do we want to (and how can we) leverage the new React Router features?
+
+### It's not a cache
+
+To me, the answers to both questions are clearly: YES. As [Ryan Florence](https://twitter.com/ryanflorence) from the remix team has put it: "React Router is not a cache":
+
+<Tweet
+  name="Ryan Florence"
+  handle="ryanflorence"
+  tweetId="1561731634419773447"
+  avatar={<AvatarRyanflorence />}
+  date={new Date("2022-08-22")}
+>
+  <p>Nah, React Router is not a cache.</p>
+  <p>
+    Browsers have this built in with HTTP and libraries like React Query have
+    this job nailed down.
+  </p>
+  <p>React Router is about *when*, data caching libs are about *what*.</p>
+</Tweet>
+
+Fetching "as early as possible" is an important concept to provide the best possible user experience. Full Stack frameworks like [NextJs](https://nextjs.org/) or Remix move this step to the server, because that is the earliest entry point. With client rendered applications, we have no such luxury.
+
+### Fetching early
+
+What we are usually doing is fetching on component mount - when data is first needed. That is not great, as it will lead to a loading spinner visible to the user for as long as we are initially fetching. [Prefetching](https://tanstack.com/query/v4/docs/guides/prefetching) can help, but only for subsequent navigations, and you need to manually set it up for every way to navigate to a route.
+
+The router however is the first component that always knows which page you are trying to visit, and because it now has loaders, it can know which data those pages need to render. This is great for the first page visit - but loaders are called on _every_ page visit. And as the router has no cache, it will hit the server again, unless we do something about it.
+
+As an example (yes, this is from the tutorial mentioned before. Credits go to Ryan Florence), suppose you have a list of contacts. If you click on one of them, you show the contact details:
+
+```jsx:title=src/routes/contact.jsx {4-6,10-11}
+
+// ⬇️ this is the loader for the detail route
+export async function loader({ params }) {
+  return getContact(params.contactId)
+}
+
+export default function Contact() {
+  // ⬇️ this gives you data from the loader
+  const contact = useLoaderData()
+  // render some jsx
+}
+```
+
+```jsx:title=src/main.jsx {1,15-16}
+
+const router = createBrowserRouter([
+  {
+    path: '/',
+    element: <Root />,
+    children: [
+      {
+        path: 'contacts',
+        element: <Contacts />,
+        children: [
+          {
+            path: 'contacts/:contactId',
+            element: <Contact />,
+            // ⬇️ this is the loader for the detail route
+            loader: contactLoader,
+          },
+        ],
+      },
+    ],
+  },
+])
+```
+
+If you navigate to `contacts/1`, data for that contact will be fetched _before_ the component is rendered. By the time we want to show the Contact, `useLoaderData` will have data readily available. This is awesome as it not only improves the user experience, but look at that developer experience of co-located data fetching and rendering! I love it. 🥰
+
+### Fetching too often
+
+The big drawback of not having a cache shows when you go to Contact 2 and then back to Contact 1 again. If you are used to React Query, you will know that data for Contact 1 is cached already, so we can show it instantly and kick of a background refetch if data is considered stale. With the loader approach, we will have to fetch that data again (and wait for it to finish fetching!), even though we have already fetched it before.
+
+And that is exactly where React Query comes in.
+
+What if we can use the loader to pre-fill the React Query Cache, but still `useQuery` in the component to get all the React Query goodies like `refetchOnWindowFocus` and showing stale data instantly? To me, this sounds like the best of both worlds. The router is responsible for fetching data early (if we don't have it), and React Query is responsible for caching and keeping the data fresh.
+
+## Querifying the example
+
+Let's try to move the example in that direction:
+
+```jsx:title=src/routes/contacts.jsx {10-11,15-19,24-25}
+
+// ⬇️ define your query
+const contactDetailQuery = (id) => ({
+  queryKey: ['contacts', 'detail', id],
+  queryFn: async () => getContact(id),
+})
+
+// ⬇️ needs access to queryClient
+export const loader =
+  (queryClient) =>
+  async ({ params }) => {
+    const query = contactDetailQuery(params.contactId)
+    // ⬇️ return data or fetch it
+    return (
+      queryClient.getQueryData(query.queryKey) ??
+      (await queryClient.fetchQuery(query))
+    )
+  }
+
+export default function Contact() {
+  const params = useParams()
+  // ⬇️ useQuery as per usual
+  const { data: contact } = useQuery(contactDetailQuery(params.contactId))
+  // render some jsx
+}
+```
+
+```jsx:title=src/main.jsx {15-16}
+const queryClient = new QueryClient()
+
+const router = createBrowserRouter([
+  {
+    path: '/',
+    element: <Root />,
+    children: [
+      {
+        path: 'contacts',
+        element: <Contacts />,
+        children: [
+          {
+            path: 'contacts/:contactId',
+            element: <Contact />,
+            // ⬇️ pass the queryClient to the route
+            loader: contactLoader(queryClient),
+          },
+        ],
+      },
+    ],
+  },
+])
+```
+
+There are a couple of things going on here, so let's break it down:
+
+### The loader needs access to the QueryClient.
+
+The loader is not a hook, so we can't `useQueryClient`. Importing the QueryClient directly is something that [I'm not recommending](react-query-fa-qs#why-should-i-usequeryclient), so passing it explicitly seems like the best alternative.
+
+### getQueryData ?? fetchQuery
+
+We want the loader to wait for our data to be ready and return it to get a good experience on the first loads. We also want errors to be thrown to the [errorElement](https://reactrouter.com/en/6.4.0/route/error-element), so `fetchQuery` is the best option. Note that `prefetchQuery` doesn't return anything and catches errors internally (otherwise, they are equivalent).
+
+`getQueryData` does the trick for returning any data we have in the cache, even if it's stale. This ensures that recurring visits to a page will show data immediately. Only if `getQueryData` returns `undefined` (meaning nothing is in the cache), we'll actually do the fetch.
+
+An alternative approach would be to set a `staleTime` for `fetchQuery`:
+
+```jsx:title=alternative-loader {6}
+export const loader =
+  (queryClient) =>
+  ({ params }) =>
+    queryClient.fetchQuery({
+      ...contactDetailQuery(params.contactId),
+      staleTime: 1000 * 60 * 2,
+    })
+```
+
+Setting the `staleTime` to two minutes tells `fetchQuery` to resolve data immediately if it's available and not older than two minutes, otherwise, it will go and fetch it. If you are fine with stale data _not_ being shown in the component, this is a good alternative.
+
+Setting `staleTime` to `Infinity` is almost equivalent to the `getQueryData` approach, except that manual query invalidation takes precedence over `staleTime`. So I like the `getQueryData` approach a bit better, even if it is slightly more code.
+
+&#x200B;<Emph>Update</Emph>: As of
+[v4.18.0](https://github.com/TanStack/query/releases/tag/v4.18.0), you
+can use the built-in
+[queryClient.ensureQueryData](https://tanstack.com/query/v4/docs/reference/QueryClient#queryclientensurequerydata)
+method to achieve the same thing. It is literally implemented with
+`getQueryData ?? fetchQuery`, but it's a common enough use-case for the
+library to have it out of the box.
+
+### A TypeScript tip
+
+With this, it is guaranteed that calling `useQuery` in the component will have some data available, just like calling `useLoaderData` would. However, TypeScript has no way of knowing this - the data returned is of type `Contact | undefined`.
+
+Thanks to [Matt Pocock](https://twitter.com/mattpocockuk) and his [contribution](https://github.com/TanStack/query/pull/3834) to React Query v4, we can now exclude `undefined` from the union if `initialData` is provided.
+
+And where would we get `initialData` from? `useLoaderData` of course! We can even infer the type from the loader function:
+
+```tsx:title=initial-data {2-3, 8}
+export default function Contact() {
+  const initialData = useLoaderData() as Awaited<
+    ReturnType<ReturnType<typeof loader>>
+  >
+  const params = useParams()
+  const { data: contact } = useQuery({
+    ...contactDetailQuery(params.contactId),
+    initialData,
+  })
+  // render some jsx
+}
+```
+
+It's a bit much to write because our loader is a function that returns a function, but we can tuck that away in a single util. Also, it seems that right now, using type assertions is the only way to narrow the return type of `useLoaderData`. 🤷‍♂️
+But it will nicely narrow the type of the `useQuery` result, which is what we want. 🙌
+
+## Invalidating in actions
+
+The next piece of the puzzle involves query invalidation. Here is how an action would look without React Query, straight from the tutorial (yes, this is all it takes to perform an update):
+
+```jsx:title=src/routes/edit.jsx
+export const action = async ({ request, params }) => {
+  const formData = await request.formData()
+  const updates = Object.fromEntries(formData)
+  await updateContact(params.contactId, updates)
+  return redirect(`/contacts/${params.contactId}`)
+}
+```
+
+Actions invalidate loaders, but because we've set up our loaders to always return data from the cache, we won't see any updates unless we somehow invalidate the cache. It's just one line of code really:
+
+```jsx:title=src/routes/edit.jsx {7}
+export const action =
+  (queryClient) =>
+  async ({ request, params }) => {
+    const formData = await request.formData()
+    const updates = Object.fromEntries(formData)
+    await updateContact(params.contactId, updates)
+    await queryClient.invalidateQueries({ queryKey: ['contacts'] })
+    return redirect(`/contacts/${params.contactId}`)
+  }
+```
+
+The [fuzzy matching of invalidateQueries](https://tanstack.com/query/v4/docs/guides/query-invalidation#query-matching-with-invalidatequeries) will make sure that our list and our detail view will get new data in the cache by the time the action is finished, and we're redirecting back to the detail view.
+
+### await is the lever
+
+However, this will make our action function take longer and block the transition. Would we not be able to trigger the invalidation, then redirect to the detail view, show the stale data and then let it update in the background once the new data is available? Of course we can: Just leave out the `await` keyword:
+
+```jsx:title=src/routes/edit.jsx {7}
+export const action =
+  (queryClient) =>
+  async ({ request, params }) => {
+    const formData = await request.formData()
+    const updates = Object.fromEntries(formData)
+    await updateContact(params.contactId, updates)
+    queryClient.invalidateQueries({ queryKey: ["contacts"] });
+    return redirect(`/contacts/${params.contactId}`)
+  }
+```
+
+Await literally becomes a lever you can pull in either direction (This analogy is based on Ryan's great talk [When To Fetch](https://www.youtube.com/watch?v=95B8mnhzoCM). Please watch it if you haven't already):
+
+- Is it important to transition back to the detail view as soon as possible? Do not await.
+- Is it important to avoid potential layout shifts when showing stale data, or do you want to keep the action pending until you have all new data? Use await.
+
+If multiple invalidations are involved, you can also mix and match the two approaches to wait for important refetches, but let less important ones be done in the background.
+
+## Summary
+
+I'm very excited about the new React Router release. It's a great step forward to enable all applications to trigger fetches as early as possible. However, it is not a replacement for caching - so go ahead and combine React Router with React Query to get the best of both worlds. 🚀
+
+If you want to explore this topic some more, I've implemented the app from the tutorial and added React Query on top of it - you can find it in [the examples of the official docs](https://tanstack.com/query/latest/docs/framework/react/examples/react-router).
+
+---
+
+That's it for today. Feel free to reach out to me on [bluesky](https://bsky.app/profile/tkdodo.eu)
+if you have any questions, or just leave a comment below. ⬇️

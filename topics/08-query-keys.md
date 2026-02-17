@@ -1,0 +1,249 @@
+# Effective React Query Keys
+
+[Query Keys](https://tanstack.com/query/latest/docs/framework/react/guides/query-keys) are a very important core concept in React Query. They are necessary so that the library can internally cache your data correctly and refetch automatically when a dependency to your query changes. Lastly, it will allow you to interact with the Query Cache manually when needed, for example, when updating data after a mutation or when you need to manually invalidate some queries.
+
+Let's quickly have a look at what these three points mean before showing you how I personally organize Query Keys to be able to do these things more effectively.
+
+## Caching Data
+
+Internally, the Query Cache is just a JavaScript object, where the keys are serialized Query Keys and the values are your Query Data plus meta information. The keys are hashed in a [deterministic way](https://tanstack.com/query/latest/docs/framework/react/guides/query-keys#query-keys-are-hashed-deterministically), so you can use objects as well (on the top level, keys have to be strings or arrays though).
+
+The most important part is that keys need to be _unique_ for your queries. If React Query finds an entry for a key in the cache, it will use it. Please also be aware that you cannot use the same key for `useQuery` _and_ `useInfiniteQuery`. There is, after all, only _one_ Query Cache, and you would share the data between these two. That is not good because infinite queries have a fundamentally different structure than "normal" queries.
+
+```ts
+useQuery({
+  queryKey: ["todos"],
+  queryFn: fetchTodos,
+});
+
+// 🚨 this won't work
+useInfiniteQuery({
+  queryKey: ["todos"],
+  queryFn: fetchInfiniteTodos,
+});
+
+// ✅ choose something else instead
+useInfiniteQuery({
+  queryKey: ["infiniteTodos"],
+  queryFn: fetchInfiniteTodos,
+});
+```
+
+## Automatic Refetching
+
+<Highlight>Queries are declarative.</Highlight>
+
+This is a _very_ important concept that cannot be emphasized enough, and it's also something that might take some time to "click". Most people think about queries, and especially refetching, in an _imperative_ way.
+
+I have a query, it fetches some data. Now I click this button and I want to refetch, but with different parameters. I've seen many attempts that look like this:
+
+```jsx:title=imperative-refetch
+function Component() {
+  const { data, refetch } = useQuery({
+    queryKey: ['todos'],
+    queryFn: fetchTodos,
+  })
+
+  // ❓ how do I pass parameters to refetch ❓
+  return <Filters onApply={() => refetch(???)} />
+}
+```
+
+The answer is: <Emph>You don't.</Emph>
+
+That's not what `refetch` is for - it's for refetching _with the same parameters_.
+
+If you have some _state_ that changes your data, all you need to do is to put it in the Query Key, because React Query will trigger a refetch automatically whenever the key changes. So when you want to apply your filters, just change your _client state_:
+
+```jsx:title=query-key-drives-the-query
+function Component() {
+  const [filters, setFilters] = React.useState()
+  const { data } = useQuery({
+    queryKey: ['todos', filters],
+    queryFn: () => fetchTodos(filters),
+  })
+
+  // ✅ set local state and let it drive the query
+  return <Filters onApply={setFilters} />
+}
+```
+
+The re-render triggered by the `setFilters` update will pass a different Query Key to React Query, which will make it refetch. I have a more in-depth example in [#1: Practical React Query - Treat the query key like a dependency array](practical-react-query#treat-the-query-key-like-a-dependency-array).
+
+## Manual Interaction
+
+Manual Interactions with the Query Cache are where the structure of your Query Keys is most important. Many of those interaction methods, like [invalidateQueries](https://tanstack.com/query/latest/docs/reference/QueryClient#queryclientinvalidatequeries) or [setQueriesData](https://tanstack.com/query/latest/docs/reference/QueryClient#queryclientsetquerydata) support [Query Filters](https://tanstack.com/query/latest/docs/framework/react/guides/filters#query-filters), which allow you to fuzzily match your Query Keys.
+
+## Effective React Query Keys
+
+Please note that these points reflect my personal opinion (as everything on this blog, actually), so don't take it as something that you absolutely must do when working with Query Keys. I have found these strategies to work best when your App becomes more complex, and they also scale quite well. You definitely don't need to do this for a Todo App 😁.
+
+### Colocate
+
+If you haven't yet read [Maintainability through colocation](https://kentcdodds.com/blog/colocation) by [Kent C. Dodds](https://twitter.com/kentcdodds), please do. I don't believe that storing all your Query Keys globally in `/src/utils/queryKeys.ts` will make things better. I keep my Query Keys next to their respective queries, co-located in a feature directory, so something like:
+
+```
+
+- src
+  - features
+    - Profile
+      - index.tsx
+      - queries.ts
+    - Todos
+      - index.tsx
+      - queries.ts
+
+```
+
+The _queries_ file will contain everything React Query related. I usually only export custom hooks, so the actual Query Functions as well as Query Keys will stay local.
+
+### Always use Array Keys
+
+Yes, Query Keys can be a string, too, but to keep things unified, I like to always use Arrays. React Query will internally convert them to an Array anyhow, so:
+
+```ts:title=always-use-array-keys
+// 🚨 will be transformed to ['todos'] anyhow
+useQuery({ queryKey: 'todos' })
+// ✅
+useQuery({ queryKey: ['todos'] })
+```
+
+&#x200B;<Emph>Update</Emph>: With React Query v4, all keys need to be Arrays.
+
+### Structure
+
+Structure your Query Keys from _most generic_ to _most specific_, with as many levels of granularity as you see fit in between. Here's how I would structure a todos list that allows for filterable lists as well as detail views:
+
+```
+['todos', 'list', { filters: 'all' }]
+['todos', 'list', { filters: 'done' }]
+['todos', 'detail', 1]
+['todos', 'detail', 2]
+```
+
+With that structure, I can invalidate everything todo related with `['todos']`, all the lists or all the details, as well as target one specific list if I know the exact key. [Updates from Mutation Responses
+](https://react-query.tanstack.com/guides/updates-from-mutation-responses) become a lot more flexible with this, because you can target all lists if necessary:
+
+```js:title=updates-from-mutation-responses
+function useUpdateTitle() {
+  return useMutation({
+    mutationFn: updateTitle,
+    onSuccess: (newTodo) => {
+      // ✅ update the todo detail
+      queryClient.setQueryData(
+        ['todos', 'detail', newTodo.id],
+        newTodo
+      )
+
+      // ✅ update all the lists that contain this todo
+      queryClient.setQueriesData(['todos', 'list'], (previous) =>
+        previous.map((todo) =>
+          todo.id === newTodo.id ? newTodo : todo
+        )
+      )
+    },
+  })
+}
+```
+
+This might not work if the structure of lists and details differ a lot, so alternatively, you can also of course just invalidate all the lists instead:
+
+```js:title=invalidate-all-lists {10-13}
+function useUpdateTitle() {
+  return useMutation({
+    mutationFn: updateTitle,
+    onSuccess: (newTodo) => {
+      queryClient.setQueryData(
+        ['todos', 'detail', newTodo.id],
+        newTodo
+      )
+
+      // ✅ just invalidate all the lists
+      queryClient.invalidateQueries({
+        queryKey: ['todos', 'list']
+      })
+    },
+  })
+}
+```
+
+If you know which list you are currently on, e.g. by reading the filters from the url, and can therefore construct the exact Query Key, you can also combine this two methods and call `setQueryData` on your list and invalidate all the others:
+
+```js:title=combine {14-28}
+function useUpdateTitle() {
+  // imagine a custom hook that returns
+  // the current filters, stored in the url
+  const { filters } = useFilterParams()
+
+  return useMutation({
+    mutationFn: updateTitle,
+    onSuccess: (newTodo) => {
+      queryClient.setQueryData(
+        ['todos', 'detail', newTodo.id],
+        newTodo
+      )
+
+      // ✅ update the list we are currently on
+      queryClient.setQueryData(
+        ['todos', 'list', { filters }],
+        (previous) =>
+          previous.map((todo) =>
+            todo.id === newTodo.id ? newtodo : todo
+          )
+      )
+
+      // 🥳 invalidate all the lists,
+      // but don't refetch the active one
+      queryClient.invalidateQueries({
+        queryKey: ['todos', 'list'],
+        refetchActive: false,
+      })
+    },
+  })
+}
+```
+
+&#x200B;<Emph>Update</Emph>: In v4, `refetchActive` has been replaced with
+`refetchType`. In the above example, that would be `refetchType: 'none'`, because we don't want to refetch anything.
+
+### Use Query Key factories
+
+In the examples above, you can see that I've been manually declaring the Query Keys a lot. This is not only error-prone, but it also makes changes harder in the future, for example, if you find out that you'd like to add _another_ level of granularity to your keys.
+
+That's why I recommend one Query Key factory per feature. It's just a simple object with entries and functions that will produce query keys, which you can then use in your custom hooks. For the above example structure, it would look something like this:
+
+```ts:title=query-key-factory
+const todoKeys = {
+  all: ['todos'] as const,
+  lists: () => [...todoKeys.all, 'list'] as const,
+  list: (filters: string) => [...todoKeys.lists(), { filters }] as const,
+  details: () => [...todoKeys.all, 'detail'] as const,
+  detail: (id: number) => [...todoKeys.details(), id] as const,
+}
+```
+
+This gives me a lot of flexibility, as each level builds on top of another, but is still independently accessible:
+
+```ts:title=examples
+// 🕺 remove everything related
+// to the todos feature
+queryClient.removeQueries({
+  queryKey: todoKeys.all
+})
+
+// 🚀 invalidate all the lists
+queryClient.invalidateQueries({
+  queryKey: todoKeys.lists()
+})
+
+// 🙌 prefetch a single todo
+queryClient.prefetchQueries({
+  queryKey: todoKeys.detail(id),
+  queryFn: () => fetchTodo(id),
+})
+```
+
+---
+
+That's it for today. Feel free to reach out to me on [bluesky](https://bsky.app/profile/tkdodo.eu)
+if you have any questions, or just leave a comment below. ⬇️

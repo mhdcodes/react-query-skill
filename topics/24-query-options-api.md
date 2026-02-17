@@ -1,0 +1,222 @@
+# The Query Options API
+
+  AvatarRalex1993,
+  TweetImage,
+  ContactDetailQuery,
+} from "components/Tweet";
+
+React Query version 5 was released about three months ago, and with it, we got one of the biggest "breaking" changes in the library's history. All of our functions now only get one object passed, instead of multiple arguments. We call this object the <Emph>Query Options</Emph>, because it contains all the options you need to create a query:
+
+```diff
+- useQuery(
+-   ['todos'],
+-   fetchTodos,
+-   { staleTime: 5000 }
+- )
++ useQuery({
++   queryKey: ['todos'],
++   queryFn: fetchTodos,
++   staleTime: 5000
++ })
+```
+
+This isn't only true for `useQuery` calls, but also for imperative actions like invalidating a query:
+
+```diff
+- queryClient.invalidateQueries(['todos'])
++ queryClient.invalidateQueries({ queryKey: ['todos'] })
+```
+
+Now technically, this API isn't new. Most of our functions had overloads, so even in v3, you could already pass an object instead of multiple arguments. It's just that it wasn't really advocated for. All examples, the docs and many blog posts (including this one) used the old API, which is why this was a breaking change for most apps.
+
+So why did we do it?
+
+## A better abstraction
+
+First of all, having all those overloads is a chore for maintainers, and it's also not clear for users. Why can I call the same function in multiple ways - is one better than the other? So, streamlining the API, thus making it easier for new starters to understand it, was one goal. "Always pass one object" is as simple and extensible as it gets.
+
+But also, it turns out that one object to rule them all is simply a very good abstraction for when you want to share query options between different functions. I discovered this "by accident" when I wrote the [React Query meets React Router](react-query-meets-react-router) article, where want to share query options between prefetching and our `useQuery` call. Now usually, you could just write custom hooks as your primary way to re-use queries. But that doesn't work when imperative function calls like `prefetching` are involved. So I came up with something, and [Alex](https://bsky.app/profile/ralexanderson‍.com) noted this as a good pattern:
+
+{/_ NOTE: The tweet id leads to Alex's now protected X account _/}
+
+<Tweet
+  name="R. Alex Anderson 🚀"
+  handle="ralex1993"
+  tweetId="1570036707134676994"
+  avatar={<AvatarRalex1993 />}
+  date={new Date("2022-09-14")}
+>
+  <p>
+    First time I saw this React Query pattern was @TkDodo's React Router blog
+    post
+  </p>
+  <p>Brilliant 👏</p>
+  <p>dev.to/tkdodo/react-q...</p>
+  <p>
+    <TweetImage>
+      <ContactDetailQuery />
+    </TweetImage>
+  </p>
+</Tweet>
+
+Turns out, if all your functions have the same interface - accepting a single object - it makes a lot of sense to abstract that object away into a query definition. Once you have that, you can pass it everywhere:
+
+```js:title=todos-query
+const todosQuery = {
+  queryKey: ['todos'],
+  queryFn: fetchTodos,
+  staleTime: 5000,
+}
+
+// ✅ works
+useQuery(todosQuery)
+
+// 🤝 sure
+queryClient.prefetchQuery(todosQuery)
+
+// 🙌 oh yeah
+useSuspenseQuery(todosQuery)
+
+// 🎉 absolutely
+useQueries([{
+  queries: [todosQuery]
+}]
+```
+
+In hindsight, this pattern just feels beautiful as the main abstraction for queries, and I wanted to apply it everywhere. There was just one problem:
+
+## TypeScript
+
+The way TypeScript handles excess properties is quite special. If you inline them, TypeScript will be like: Why are you doing this - it doesn't make any sense, I'll error out:
+
+```ts:title=inlined-objects
+useQuery({
+  queryKey: ['todos'],
+  queryFn: fetchTodos,
+  stallTime: 5000,
+})
+```
+
+[TypeScript playground](https://www.typescriptlang.org/play?#code/JYWwDg9gTgLgBAbzgVwM4FMCKz1QJ5wC+cAZlBCHAOQACMAhgHaoMDGA1gPRTr2swBaAI458VAFDiYeMOjgAVCABMIcALyJxcbXGBKAXHEbIQAI1zjC4pelYAbej1LJG-YBEal0MVgAtFKqgAFACUhgAK5CDAGAA8AIJQUPR4sQEQAHwZkmhYonhBCFpwIrh4ANLoeIYA2lQwyhCoVAC6ADTFpfgAYoyGJN5+6agd2iz0dnbyoOiGAKwADEsdhCFAA)
+
+<TsError>
+  Object literal may only specify known properties, but 'stallTime' does not
+  exist in type 'UseQueryOptions&lt;Todo[], Error, Todo[], string[]&gt;'. Did
+  you mean to write 'staleTime'?(2769)
+</TsError>
+
+Which is cool, because it catches typos like the one above. But what if you abstract the whole object away into a constant, like our pattern suggests?
+
+```ts:title=no-error
+const todosQuery = {
+  queryKey: ['todos'],
+  queryFn: fetchTodos,
+  stallTime: 5000,
+}
+
+useQuery(todosQuery)
+```
+
+[TypeScript playground](https://www.typescriptlang.org/play?#code/JYWwDg9gTgLgBAbzgVwM4FMCKz1QJ5wC+cAZlBCHAOQACMAhgHaoMDGA1gPRTr2swBaAI458VAFDiYeMOjgAVCABMIcALyJxcbXGBKAXHEbIQAI1zjC4pelYAbej1LJG-YBEal0MVgAtFKqgAFACUhgAK5CDAGAA8AIJQUPR4sQEQAHwZkqweLHAwyhCo2LgEGghacCJlANLoeIYA2lSFgVQAugA0VTX4AGKMhiTefumoPdos9HZ28qDohgCsAAxrPVbiaFiieEFtxaX4IUA)
+
+No error. 🙈
+
+TypeScript is quite relaxed in these situations, because at runtime, the "extra" property `stallTime` doesn't hurt, and you might want to use that object in a context where the property is required. TypeScript can't know that. And since `staleTime` is optional, we are now just _not_ passing it. Of course, this is "valid", but it's not what we'd expect, and it can be a costly mistake to find.
+
+## queryOptions
+
+That's why we've introduced a type-safe helper function in v5 called `queryOptions`. At runtime, it doesn't do anything:
+
+```js:title=queryOptions
+export function queryOptions(options) {
+  return options
+}
+```
+
+But on type level, it's a real powerhouse that not only fixes the above typo issue (see the [fixed playground](https://www.typescriptlang.org/play?#code/JYWwDg9gTgLgBAbzgVwM4FMCKz1QJ4A0cAjjvgPJgzAQB2qcAvnAGZQQhwDkAAjAIb0BAYwDWAeijp+wmAFpSuPFwBQKmHjDo4AFQgATCHAC8iFXAtxg+gFxxayEACNcKxiv3phAG35TWyLSyNLSs6DDCABZ6hqgAFACUdgAK7CDAGAA8AIJQUPx4mTEQAHwlasJ0qPAwBhCo2EomJGR4lNRVcQjmLUoA0uh4dgDaXLWxXAC6BD2K+ABitHYs4VHFqDMW1fze3jqg6HYArAAMZzOMCWpoWK1x4-WN+AlAA)) - it can also help us make other parts of the `queryClient` more type-safe:
+
+### DataTag
+
+There's one thing about `queryClient.getQueryData` and similar functions that has always been a bit annoying in React Query: On type level, they return `unknown`. That's because React Query doesn't have an up-front, centralized definition, so when you call `queryClient.getQueryData(['todos'])`, there's no way how the library could know what type will be returned.
+
+We are forced to help out ourselves by providing the type parameter to the function call:
+
+```ts:title=manual-type-parameter
+const todos = queryClient.getQueryData<Array<Todo>>(['todos'])
+//    ^? const todos: Todo[] | undefined
+```
+
+To be clear, this isn't at all safer than just using type assertions, but at least `undefined` will be added to the union for us. If we refactor what our `fetchTodos` endpoint returns, we won't be notified here of the new type. 😔
+
+But now that we have a function that co-locates `queryKey` and `queryFn`, we can associate the type of the `queryFn` and "tag" our `queryKey` with it. Notice what happens when we pass the `queryKey` that was created via `queryOptions` to `getQueryData`:
+
+```ts:title=tagged-query-key
+const todosQuery = queryOptions({
+  queryKey: ['todos'],
+  queryFn: fetchTodos,
+  staleTime: 5000,
+})
+
+const todos = queryClient.getQueryData(todosQuery.queryKey)
+//    ^? const todos: Todo[] | undefined
+```
+
+[TypeScript Playground](https://www.typescriptlang.org/play?#code/JYWwDg9gTgLgBAbzgVwM4FMCKz1QJ4A0cAjjvgPJgzAQB2qR2ueAwgDbDq3wC+cAZlAgg4AcgACMAIb1pAYwDWAeijopcmAFpSzUQCg9MPGHRwAKhAAmEOAF5EeuE7jBLALji1kIAEa49PHqW6HJsUqoCyLQaNLQC6DByABYW1qgAFACUHgAKQiDAGAA8AIJQUFJ4RakQAHy1BnJ0qPA6+Oyc3Hae6ADucEztHFwwWY3N8DBWEKiDeN1teJTUzekIjiRkeADS6HgeANqiU2miALoEG4sAYrQe-AnJNQwbLVJs6Gag6B4ArAAMgMuPEy41kcBOMwWWw6IwAdABzBJzAAiUmk6Uhsy2cMWuzwoKUSmccAAegB+IA)
+
+🤯
+
+This is pure TypeScript magic, contributed by the one and only [Mateusz Burzyński](https://twitter.com/AndaristRake). If we look at `todosQuery.queryKey`, we can see that it's not only a string array, but it also contains information about what the `queryFn` returns:
+
+```ts:title=dataTagSymbol
+(property) queryKey: string[] & {
+  [dataTagSymbol]: Todo[];
+}
+```
+
+That information will then be read out by `getQueryData` (and other functions like `setQueryData`, too), to infer the type for us. This brings a whole new level of type safety to React Query, while at the same time making it easier for us to re-use query options. A huge win in DX. 🚀
+
+## Query Factories
+
+So, if you're asking me, I want to use this pattern and the `queryOptions` helper everywhere. I would even take it to a point where custom hooks won't be my first choice for abstractions. They seem a bit pointless if all they do is:
+
+```ts:title=custom-hooks
+const useTodos = () => useQuery(todosQuery)
+```
+
+There's nothing wrong with calling `useQuery` in your component directly, especially if you sometimes want to mix it with `useSuspenseQuery`. Of course, if the hook does more, like additional memoization with `useMemo`, it's still perfectly fine to add it. But I wouldn't immediately reach for it like I did before.
+
+Additionally, I'm seeing [Query Key Factories](effective-react-query-keys) in a bit of a different light now. I've come to learn that:
+
+<Highlight>Separating QueryKey from QueryFunction was a mistake</Highlight>
+
+The `queryKey` defines the dependencies to our `queryFn` - everything we use inside it must go into the key. So why define keys in one central place while having the functions far a way from them in our custom hooks?
+
+However, if we <Emph>combine</Emph> the two patterns, we're getting the best of all worlds: Type safety, co-location and great DX. 🚀
+
+An example query factory could look something like this:
+
+```ts:title=query-factory
+const todoQueries = {
+  all: () => ['todos'],
+  lists: () => [...todoQueries.all(), 'list'],
+  list: (filters: string) =>
+    queryOptions({
+      queryKey: [...todoQueries.lists(), filters],
+      queryFn: () => fetchTodos(filters),
+    }),
+  details: () => [...todoQueries.all(), 'detail'],
+  detail: (id: number) =>
+    queryOptions({
+      queryKey: [...todoQueries.details(), id],
+      queryFn: () => fetchTodo(id),
+      staleTime: 5000,
+    }),
+}
+```
+
+It contains a mix of key-only entries that we can use to build a hierarchy and for query invalidation, as well as full query objects created with the `queryOptions` helper.
+
+---
+
+That's it for today. Feel free to reach out to me on [bluesky](https://bsky.app/profile/tkdodo.eu)
+if you have any questions, or just leave a comment below. ⬇️

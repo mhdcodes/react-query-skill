@@ -1,0 +1,74 @@
+# Offline React Query
+
+I've said it time and time again - React Query is an [async state manager](react-query-as-a-state-manager). As long as you give it a Promise, resolved or rejected, the library is happy. Doesn't matter where that Promise comes from.
+
+There are many ways to produce promises, but by far the biggest use-case is data fetching. Very often, that requires an active network connection. But sometimes, especially on mobile devices where the network connection can be unreliable, you need your app to also work without it.
+
+## Issues in v3
+
+React Query is very well-equipped to handle offline scenarios. Because it provides a caching layer, as long as the cache is filled, you can keep working even if you don't have a network connection. Let's look at a couple of edge-case scenarios where v3 will not work as expected. I will use our basic post list / post detail [example from the docs](https://react-query.tanstack.com/examples/basic) for illustration:
+
+### 1) no data in the cache
+
+As I said, in v3, things work well as long as the cache is filled. An edge case scenario where things get weird would be the following:
+
+- You have a good network connection and navigate to the list view
+- You lose connection and click on a post.
+
+<GifPlayer gif="loading-forever.gif" still="loading-forever.png" />
+
+What happens is that your query will stay in `loading` state until you regain connection. Also, you can see a failed network request in the browser devtools. That is because React Query will always fire off the first request, and if that fails, it will pause retries if you have no network connection.
+
+Further, the React Query Devtools will show that your query is `fetching`, which is not entirely true. The query is actually `paused`, but we have no concept to represent that state - it's a hidden implementation detail.
+
+### 2) no retries
+
+Similarly, if you have turned off retries altogether in the above scenario, your query will go to error state immediately, with no way of stopping that.
+
+<GifPlayer gif="network-error.gif" still="network-error.png" />
+
+Why do I need `retries` for my query to `pause` if I have no network connection 🤷‍♂️?
+
+### 3) queries that don't need the network
+
+Queries that don't need a network connection to work (e.g. because they do an expensive async processing in a web worker) will be paused until you regain network connection if they fail for some other reason. Also, those queries won't run on window focus because that feature is completely disabled if you have no network connection.
+
+
+Let's take a look at how [case 1](#1-no-data-in-the-cache) from above can look like in v4. Please notice the new network mode toggle button in the RQ devtools. It's pretty cool because it doesn't actually turn off your network - it just makes React Query _believe_ that there is no network for testing purposes. Yes, I am quite proud of it. 😊
+
+<GifPlayer gif="paused.gif" still="paused.png" />
+
+We can clearly see the state the query is in (`paused`) due to the new purple status badge. Also, the first network request is made once we turn the network back on.
+
+### always
+
+In this mode, React Query does not care about your network connection at all. Queries will always fire, and they will never be paused. This is most useful if you use React Query for something _other than_ data fetching.
+
+### offlineFirst
+
+This mode is very similar to how React Query worked in v3. The first request will _always_ be made, and if that fails, retries will be paused. This mode is useful if you're using an additional caching layer like the browser cache on top of React Query.
+
+Let's take the GitHub repo API as an example. It sends the following response headers:
+
+```
+cache-control: public, max-age=60, s-maxage=60
+```
+
+which means that for the next 60 seconds, if you request that resource again, the response will come from the browser cache. The neat thing about this is that it works while you're offline, too! Service workers, e.g. for [offline first PWAs](https://developer.mozilla.org/en-US/docs/Web/Progressive_web_apps/Offline_Service_workers), work in a similar way by intercepting the network request and delivering cached responses if they are available.
+
+Now those things wouldn't work if React Query would decide to _not_ fire the request because you have no network connection, like the default `online` mode does. To intercept a fetch request, it must happen :) So if you have this additional cache layer, make sure to use `networkMode: 'offlineFirst'`.
+
+If the first request goes out, and you hit the cache - great, your query will go to `success` state, and you'll get that data. And if you have a cache miss, you'll likely get a network error, after which React Query will pause the retries, which will put your query into the `paused` state. It's the best of both worlds. 🙌
+
+## What does all of this mean for me, exactly?
+
+Nothing, unless you want to. You can still decide to ignore that new `fetchStatus` and only check for `isLoading` - React Query will behave just like before (well - [case 2](#2-no-retries) from above will even work better because you won't see the network error).
+
+However, if making your app robust for situations where you have no network connection is a priority for you, you now have the option to react to the exposed `fetchStatus` and act accordingly.
+
+What you do with that new status is up to you. I'm excited to see which ux people will build on top of this. 🚀
+
+---
+
+That's it for today. Feel free to reach out to me on [bluesky](https://bsky.app/profile/tkdodo.eu)
+if you have any questions, or just leave a comment below. ⬇️
